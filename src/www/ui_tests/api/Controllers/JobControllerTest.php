@@ -15,6 +15,7 @@ namespace Fossology\UI\Api\Test\Controllers;
 use Fossology\Lib\Dao\JobDao;
 use Fossology\Lib\Dao\ShowJobsDao;
 use Fossology\Lib\Dao\UploadDao;
+use Fossology\Lib\Db\DbManager;
 use Fossology\UI\Api\Controllers\JobController;
 use Fossology\UI\Api\Exceptions\HttpForbiddenException;
 use Fossology\UI\Api\Exceptions\HttpNotFoundException;
@@ -74,6 +75,12 @@ class JobControllerTest extends \PHPUnit\Framework\TestCase
   private $groupId;
 
   /**
+   * @var DbManager $dbManager
+   * DbManager mock
+   */
+  private $dbManager;
+
+  /**
    * @var JobController $jobController
    * JobController object to test
    */
@@ -105,8 +112,10 @@ class JobControllerTest extends \PHPUnit\Framework\TestCase
     $this->showJobsDao = M::mock(ShowJobsDao::class);
     $this->uploadDao = M::mock(UploadDao::class);
     $this->groupId = 2;
+    $this->dbManager = M::mock(DbManager::class);
 
     $this->restHelper->shouldReceive('getDbHelper')->andReturn($this->dbHelper);
+    $this->dbHelper->shouldReceive('getDbManager')->andReturn($this->dbManager);
     $this->restHelper->shouldReceive('getJobDao')->andReturn($this->jobDao);
     $this->restHelper->shouldReceive('getShowJobDao')->andReturn($this->showJobsDao);
     $this->restHelper->shouldReceive('getUploadDao')->andReturn($this->uploadDao);
@@ -347,6 +356,176 @@ class JobControllerTest extends \PHPUnit\Framework\TestCase
      * accessibility check, building the job queue details would hit an
      * unexpected Mockery call and fail the test for the wrong reason. */
     $this->jobController->getJobs($request, $response, ["id" => 12]);
+  }
+
+  public function testGetJobLog()
+  {
+    $jobId = 12;
+    $queueId = 45;
+    $logContent = "Started scan\nProcessing files\nScan completed successfully\n";
+
+    $logFile = tempnam(sys_get_temp_dir(), 'fossology-job-log-');
+    file_put_contents($logFile, $logContent);
+
+    $this->dbManager->shouldReceive('getSingleRow')
+      ->once()
+      ->withArgs([
+        "SELECT jq.jq_log
+        FROM jobqueue jq
+        INNER JOIN job j ON j.job_pk = jq.jq_job_fk
+        WHERE j.job_pk = $1
+          AND jq.jq_pk = $2",
+        [$jobId, $queueId]
+      ])
+      ->andReturn([
+        'jq_log' => $logFile
+      ]);
+
+    $response = new ResponseHelper();
+
+    $request = new Request(
+      'GET',
+      new Uri('/jobs/' . $jobId . '/' . $queueId . '/log'),
+      new Headers()
+    );
+
+    $result = $this->jobController->getJobLog(
+      $request,
+      $response,
+      $args
+    );
+
+    $data = $this->getResponseJson($result);
+
+    $this->assertEquals(200, $result->getStatusCode());
+    $this->assertEquals($logContent, $data['log']);
+    $this->assertFalse($data['truncated']);
+
+    unlink($logFile);
+  }
+
+  public function testGetJobLogWhenLogFileDoesNotExist()
+  {
+    $jobId = 12;
+    $queueId = 45;
+
+    $this->dbManager->shouldReceive('getSingleRow')
+      ->withArgs([
+        "SELECT jq.jq_log
+        FROM jobqueue jq
+        INNER JOIN job j ON j.job_pk = jq.jq_job_fk
+        WHERE j.job_pk = $1
+          AND jq.jq_pk = $2",
+        [$jobId, $queueId]
+      ])
+      ->andReturn([
+        'jq_log' => '/non/existent/job/log/file.log'
+      ]);
+
+    $response = new ResponseHelper();
+
+    $request = new Request(
+      'GET',
+      new Uri('/jobs/' . $jobId . '/' . $queueId . '/log'),
+      new Headers()
+    );
+
+    $result = $this->jobController->getJobLog(
+      $request,
+      $response,
+      $jobId,
+      $queueId
+    );
+
+    $data = $this->getResponseJson($result);
+
+    $this->assertEquals(200, $result->getStatusCode());
+    $this->assertEquals('', $data['log']);
+    $this->assertFalse($data['truncated']);
+  }
+
+  public function testGetJobLogWhenJobQueueDoesNotExist()
+  {
+    $jobId = 12;
+    $queueId = 999;
+
+    $this->dbManager->shouldReceive('getSingleRow')
+      ->withArgs([
+        "SELECT jq.jq_log
+        FROM jobqueue jq
+        INNER JOIN job j ON j.job_pk = jq.jq_job_fk
+        WHERE j.job_pk = $1
+          AND jq.jq_pk = $2",
+        [$jobId, $queueId]
+      ])
+      ->andReturn([]);
+
+    $response = new ResponseHelper();
+
+    $request = new Request(
+      'GET',
+      new Uri('/jobs/' . $jobId . '/' . $queueId . '/log'),
+      new Headers()
+    );
+
+    $result = $this->jobController->getJobLog(
+      $request,
+      $response,
+      $jobId,
+      $queueId
+    );
+
+    $data = $this->getResponseJson($result);
+
+    $this->assertEquals(404, $result->getStatusCode());
+    $this->assertEquals('Job queue not found.', $data['message']);
+  }
+
+  public function testGetJobLogTruncatesLargeLog()
+  {
+    $jobId = 12;
+    $queueId = 45;
+
+    $logContent = str_repeat('A', 32768) . 'EXTRA CONTENT';
+
+    $logFile = tempnam(sys_get_temp_dir(), 'fossology-job-log-');
+    file_put_contents($logFile, $logContent);
+
+    $this->dbManager->shouldReceive('getSingleRow')
+      ->withArgs([
+        "SELECT jq.jq_log
+        FROM jobqueue jq
+        INNER JOIN job j ON j.job_pk = jq.jq_job_fk
+        WHERE j.job_pk = $1
+          AND jq.jq_pk = $2",
+        [$jobId, $queueId]
+      ])
+      ->andReturn([
+        'jq_log' => $logFile
+      ]);
+
+    $response = new ResponseHelper();
+
+    $request = new Request(
+      'GET',
+      new Uri('/jobs/' . $jobId . '/' . $queueId . '/log'),
+      new Headers()
+    );
+
+    $result = $this->jobController->getJobLog(
+      $request,
+      $response,
+      $jobId,
+      $queueId
+    );
+
+    $data = $this->getResponseJson($result);
+
+    $this->assertEquals(32768, strlen($data['log']));
+    $this->assertTrue($data['truncated']);
+    $this->assertEquals(str_repeat('A', 32768), $data['log']);
+
+    unlink($logFile);
   }
 
   /**
