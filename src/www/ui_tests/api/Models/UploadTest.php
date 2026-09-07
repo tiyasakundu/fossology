@@ -37,7 +37,7 @@ class UploadTest extends TestCase
   {
     $hash = new Hash('sha1checksum', 'md5checksum', 'sha256checksum', 123123);
     $upload = new Upload(2, 'root', 3, '', 'my.tar.gz', '01-01-2020', 3,
-    $hash);
+      \Fossology\Lib\Data\UploadStatus::OPEN, $hash);
     $this->assertInstanceOf(Upload::class, $upload);
   }
 
@@ -94,7 +94,7 @@ class UploadTest extends TestCase
     }
 
     $actualUpload = new Upload(2, 'root', 3, '', 'my.tar.gz', '01-01-2020', 3,
-      $hash);
+      \Fossology\Lib\Data\UploadStatus::OPEN, $hash);
     $actualUpload->setAssigneeDate("01-01-2020");
     $actualUpload->setClosingDate("01-01-2020");
 
